@@ -1,17 +1,26 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Alert, Button, Divider, Segmented, Select, Space, Tag, Tooltip } from 'antd'
 import { DeleteOutlined, PlusOutlined, RedoOutlined, UndoOutlined } from '@ant-design/icons'
 import { useDispatch, useSelector } from 'react-redux'
 import { Accidental, Formatter, Renderer, Stave, StaveNote, Voice } from 'vexflow'
 import type { AppDispatch, RootState } from '../store'
 import { addNote, redo, removeNote, selectNote, selectTrack, transposeTrack, undo, updateNote } from '../store'
+import { recomputePartLayout } from '../draft'
 
 export default function ScoreEditor() {
   const dispatch = useDispatch<AppDispatch>()
-  const { tracks, selectedTrackId, selectedNoteIndex, history, future, dirty } = useSelector((state: RootState) => state.score)
+  const { tracks, selectedTrackId, selectedNoteIndex, history, future, dirty, comments } = useSelector((state: RootState) => state.score)
   const track = tracks.find((item) => item.id === selectedTrackId)!
   const note = track.notes[selectedNoteIndex]
   const scoreRef = useRef<HTMLDivElement>(null)
+
+  // 移调后重算分谱排版：页数、提示音与换页建议跟随音符位置
+  const layout = useMemo(() => recomputePartLayout(track, tracks), [track, tracks])
+  const measureComments = useMemo(() => {
+    const map = new Map<number, number>()
+    comments.filter((c) => !c.resolved).forEach((c) => map.set(c.measure, (map.get(c.measure) ?? 0) + 1))
+    return map
+  }, [comments])
 
   useEffect(() => {
     const element = scoreRef.current
@@ -38,8 +47,20 @@ export default function ScoreEditor() {
       }
       context.setFont('Arial', 11, 'normal').fillText(track.name, index * 340 + 10, 15)
       if (track.transposition) context.fillText(`移调 ${track.transposition > 0 ? '+' : ''}${track.transposition}`, index * 340 + 210, 15)
+      // 评论锚点与换页建议跟随音符位置
+      const commentCount = measureComments.get(index + 1) ?? 0
+      if (commentCount) {
+        context.fillStyle = '#d97706'
+        context.fillText(`评 ${commentCount}`, index * 340 + 120, 15)
+        context.fillStyle = '#172033'
+      }
+      if (layout.pageTurnMeasure === index + 1) {
+        context.fillStyle = '#2563eb'
+        context.fillText('换页', index * 340 + 170, 15)
+        context.fillStyle = '#172033'
+      }
     })
-  }, [track])
+  }, [track, measureComments, layout])
 
   const update = (patch: Parameters<typeof updateNote>[0] extends never ? never : Record<string, unknown>) => dispatch(updateNote(patch as never))
   return <main className="page">
@@ -47,7 +68,10 @@ export default function ScoreEditor() {
     <div className="score-toolbar"><Segmented value={selectedTrackId} options={tracks.map((item) => ({ label: item.name, value: item.id }))} onChange={(value) => dispatch(selectTrack(String(value)))} /><span style={{flex:1}} /><Button onClick={() => dispatch(transposeTrack(-1))}>降半音</Button><Button onClick={() => dispatch(transposeTrack(1))}>升半音</Button><Select value={track.transposition} style={{width:120}} options={[-12,-7,-5,-2,0,2,5,7,12].map((value)=>({value,label:`移调 ${value > 0 ? '+' : ''}${value}`}))} onChange={(value) => dispatch(transposeTrack(value - track.transposition))} /></div>
     <Alert type="info" showIcon message={`${track.instrument} · ${track.clef === 'treble' ? '高音谱号' : track.clef === 'bass' ? '低音谱号' : '中音谱号'}`} description="当前显示移调后的实际记谱音高。移调仅改变当前声部，不修改总谱其他声部。" style={{ marginBottom: 12 }} />
     <div className="score-grid">
-      <section><div className="score-canvas-wrap" ref={scoreRef} /><div className="note-strip">{track.notes.map((item,index)=><button key={item.id} className={`note-chip ${index===selectedNoteIndex?'active':''}`} onClick={()=>dispatch(selectNote(index))}><b>{index+1}</b><small>{item.key.replace('/', '')} · {item.dynamic}</small></button>)}</div><Space wrap><Button icon={<PlusOutlined />} onClick={()=>dispatch(addNote())}>添加音符</Button><Button danger icon={<DeleteOutlined />} onClick={()=>dispatch(removeNote())}>删除当前</Button><Button onClick={()=>update({ duration: note?.duration === 'q' ? 'h' : note?.duration === 'h' ? '8' : 'q' })}>切换时值</Button><Button onClick={()=>update({ tie: !note?.tie })}>{note?.tie ? '取消延音' : '增加延音'}</Button><Button onClick={()=>update({ accidental: note?.accidental ? undefined : '#' })}>{note?.accidental ? '移除临时记号' : '增加升号'}</Button></Space></section>
+      <section><div className="score-canvas-wrap" ref={scoreRef} /><div className="note-strip">{track.notes.map((item, index) => {
+        const anchorMatch = item.anchor.match(/#m(\d+)#n(\d+)/)
+        return <button key={item.id} className={`note-chip ${index === selectedNoteIndex ? 'active' : ''}`} onClick={() => dispatch(selectNote(index))}><b>{index + 1}</b><small>{item.key.replace('/', '')} · {item.dynamic}</small><small style={{ display: 'block', color: '#94a3b8' }}>锚 {anchorMatch ? `${anchorMatch[1]}-${anchorMatch[2]}` : '—'}</small></button>
+      })}</div><Space wrap><Button icon={<PlusOutlined />} onClick={() => dispatch(addNote())}>添加音符</Button><Button danger icon={<DeleteOutlined />} onClick={() => dispatch(removeNote())}>删除当前</Button><Button onClick={() => update({ duration: note?.duration === 'q' ? 'h' : note?.duration === 'h' ? '8' : 'q' })}>切换时值</Button><Button onClick={() => update({ tie: !note?.tie })}>{note?.tie ? '取消延音' : '增加延音'}</Button><Button onClick={() => update({ accidental: note?.accidental ? undefined : '#' })}>{note?.accidental ? '移除临时记号' : '增加升号'}</Button></Space></section>
       <aside className="panel"><h3>音符属性</h3><label>力度</label><Select value={note?.dynamic} style={{width:'100%'}} options={['pp','p','mp','mf','f','ff'].map((value)=>({value,label:value}))} onChange={(value)=>update({ dynamic:value })} /><label>表情标记</label><Select value={note?.expression} allowClear style={{width:'100%'}} options={[{value:'dolce',label:'dolce 柔和地'},{value:'cantabile',label:'cantabile 如歌地'},{value:'marcato',label:'marcato 着重地'}]} onChange={(value)=>update({ expression:value ?? '' })} /><Divider /><h3>和弦与节奏校验</h3><div className="check-row"><span>小节拍数</span><b className="success">完整</b></div><div className="check-row"><span>声部音域</span><b className="success">符合</b></div><div className="check-row"><span>移调范围</span><b className="warning">圆号需复核</b></div><Alert type="warning" showIcon message="第 2 小节力度冲突" description="指挥评论要求圆号再弱一级，请应用评论后形成新版本。" style={{ marginTop: 14 }} /></aside>
     </div>
   </main>
